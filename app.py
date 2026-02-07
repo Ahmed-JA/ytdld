@@ -16,7 +16,7 @@ def setup_tools():
         if not os.path.exists("rclone"):
             os.system("wget -q https://downloads.rclone.org/rclone-current-linux-amd64.zip && unzip -qj rclone-current-linux-amd64.zip '*/rclone' && chmod +x rclone")
         
-        # تحميل ffmpeg النسخة الثابتة لضمان الضغط الذكي
+        # تحميل ffmpeg النسخة الثابتة
         if not os.path.exists("ffmpeg"):
             os.system("wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && tar -xJf ffmpeg-release-amd64-static.tar.xz && mv ffmpeg-*-amd64-static/ffmpeg ffmpeg-*-amd64-static/ffprobe ./ && chmod +x ffmpeg ffprobe")
         
@@ -38,18 +38,21 @@ def run_radar_logic(params):
     f_range = params.get("range", "")
     sort_by = params.get("sort", "Default")
 
+    if not p_url: return
     if not os.path.exists(folder_name): os.makedirs(folder_name)
     
     try:
+        print(f"🔎 فحص الرابط: {p_url}")
         y_cmd = ["yt-dlp", "--dump-json", "--flat-playlist", p_url]
         raw = subprocess.check_output(y_cmd, text=True).splitlines()
         all_vids = [json.loads(line) for line in raw]
 
-        if sort_by == "Most Viewed": all_vids.sort(key=lambda x: x.get('view_count') or 0, reverse=True)
+        if sort_by == "Most Viewed": 
+            all_vids.sort(key=lambda x: x.get('view_count') or 0, reverse=True)
         
         start_num = 1
-        if f_range.strip() and "-" in f_range:
-            s, e = map(int, f_range.split('-'))
+        if f_range and "-" in str(f_range):
+            s, e = map(int, str(f_range).split('-'))
             start_num = s
             target_list = all_vids[s-1:e]
         else: target_list = all_vids
@@ -59,50 +62,66 @@ def run_radar_logic(params):
             v_url = f"https://www.youtube.com/watch?v={vid['id']}"
             output_tmpl = f"{folder_name}/{current_idx} - %(title)s ByAK.%(ext)s"
             
-            # استخدام ffmpeg الذي تم تحميله محلياً
+            # إعداد أمر التحميل
             dl_cmd = ["yt-dlp", "--quiet", "--no-warnings", "--ffmpeg-location", "./ffmpeg"]
             
             if mode == "Audio Only":
                 if quality_a == "VBR_Smart_22k":
                     dl_cmd.extend(["--extract-audio", "--audio-format", "mp3", "--postprocessor-args", "ffmpeg:-ac 1 -ar 22050 -q:a 9", "-o", output_tmpl, v_url])
                 else:
-                    aq = quality_a[:-1] if "k" in quality_a else "0"
+                    aq = str(quality_a).replace("k", "")
                     dl_cmd.extend(["--extract-audio", "--audio-format", "mp3", "--audio-quality", aq, "-o", output_tmpl, v_url])
             else:
-                res = quality_v[:-1] if "p" in quality_v else "360"
+                res = str(quality_v).replace("p", "")
                 dl_cmd.extend(["-f", f"bestvideo[height<={res}][ext=mp4]+bestaudio[ext=m4a]/best", "-o", output_tmpl, v_url])
 
             print(f"🎬 جاري معالجة: {current_idx}")
             subprocess.run(dl_cmd)
 
-            # الرفع الفوري عبر rclone
+            # الرفع الفوري
             for file in os.listdir(folder_name):
                 if file.startswith(current_idx) and not file.endswith(".part"):
                     f_p = os.path.join(folder_name, file)
                     sub_f = "Audio" if mode == "Audio Only" else "Videos"
-                    dest = f"dst:MyFiles/خاص يوتيوب/{folder_name}/{sub_f}".replace("//", "/")
+                    # المسار المطلوب في WebDAV
+                    dest = f"dst:MyFiles/خاص يوتيوب/{folder_name}/{sub_f}"
                     subprocess.run(["./rclone", "move", f_p, dest, "--config", "up.conf", "-q"])
                     break
             gc.collect()
+        print(f"✅ انتهت المهمة للمجلد: {folder_name}")
     except Exception as e:
         print(f"❌ خطأ في المعالجة: {e}")
 
-# --- [ نقاط اتصال Flask ] ---
+# --- [ نقاط اتصال Flask المحدثة ] ---
 
-@app.route('/start', methods=['POST'])
+@app.route('/start', methods=['GET', 'POST'])
 def start_task():
-    data = request.json
+    # دعم استقبال البيانات من POST (JSON) أو GET (URL Parameters)
+    if request.method == 'POST':
+        data = request.json if request.is_json else request.form.to_dict()
+    else:
+        data = request.args.to_dict()
+
+    if not data or 'url' not in data:
+        return jsonify({"status": "error", "message": "Missing URL parameter"}), 400
+    
+    # تشغيل الرادار في الخلفية
     threading.Thread(target=run_radar_logic, args=(data,)).start()
-    return jsonify({"status": "running", "message": "Radar v6.2 active"}), 200
+    
+    return jsonify({
+        "status": "running", 
+        "message": "Radar v6.2 started in background",
+        "received_params": data
+    }), 200
 
 @app.route('/')
 def health():
     return "<h1>Radar Backend is Online</h1>", 200
 
 if __name__ == '__main__':
-    # 1. تشغيل تحميل الأدوات في Thread منفصل لعدم تعطيل الفحص
+    # تشغيل التجهيز في الخلفية
     threading.Thread(target=setup_tools, daemon=True).start()
     
-    # 2. تشغيل Flask فوراً على البورت 8080
+    # التشغيل على بورت كويب
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
